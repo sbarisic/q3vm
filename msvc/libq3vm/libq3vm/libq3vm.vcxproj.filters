@@ -1,10 +1,10 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <ClCompile Include="..\..\..\src\main.c" />
     <ClCompile Include="..\..\..\src\vm\vm.c">
       <Filter>vm</Filter>
     </ClCompile>
+    <ClCompile Include="libq3vm.c" />
   </ItemGroup>
   <ItemGroup>
     <Filter Include="vm">
@@ -18,5 +18,8 @@
     <ClInclude Include="vs_patches.h">
       <Filter>vm</Filter>
     </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="libq3vm.def" />
   </ItemGroup>
 </Project>

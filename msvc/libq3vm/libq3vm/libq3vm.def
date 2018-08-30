@@ -1,0 +1,6 @@
+LIBRARY libq3vm
+EXPORTS
+	VM_Create
+	VM_Free
+	VM_Call
+	VM_ArgPtr
