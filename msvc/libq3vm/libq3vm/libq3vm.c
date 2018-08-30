@@ -14,13 +14,43 @@
 #include <stdio.h>
 #include "vm.h"
 
+#define EXPORT __declspec(dllexport)
+
+typedef void (*VM_ErrorFunc)(vmErrorCode_t level, const char* error);
+typedef intptr_t (*VM_MallocFunc)(size_t size, vm_t* vm, vmMallocType_t type);
+typedef void (*VM_FreeFunc)(void* p, vm_t* vm, vmMallocType_t type);
+
+static VM_ErrorFunc  OnError;
+static VM_MallocFunc OnMalloc;
+static VM_FreeFunc   OnFree;
+
+int EXPORT VM_Init(VM_ErrorFunc onError, VM_MallocFunc onMalloc,
+                   VM_FreeFunc onFree)
+{
+    OnError  = onError;
+    OnMalloc = onMalloc;
+    OnFree   = onFree;
+    return sizeof(vm_t);
+}
+
+void Com_Error(vmErrorCode_t level, const char* error)
+{
+    OnError(level, error);
+}
+
+void* Com_malloc(size_t size, vm_t* vm, vmMallocType_t type)
+{
+    return OnMalloc(size, vm, type);
+}
+
+void Com_free(void* p, vm_t* vm, vmMallocType_t type)
+{
+    OnFree(p, vm, type);
+}
+
 /* The compiled bytecode calls native functions,
    defined in this file. */
 intptr_t systemCalls(vm_t* vm, intptr_t* args);
-
-/* Load an image from a file. Data is allocated with malloc.
-   Call free() to unload image. */
-uint8_t* loadImage(const char* filepath);
 
 int main(int argc, char** argv)
 {
@@ -33,8 +63,10 @@ int main(int argc, char** argv)
         return retVal;
     }
 
-    char*    filepath = argv[1];
-    uint8_t* image    = loadImage(filepath);
+    char* filepath = argv[1];
+    // uint8_t* image    = loadImage(filepath);
+    uint8_t* image = NULL;
+
     if (!image)
     {
         return -1;
@@ -49,64 +81,6 @@ int main(int argc, char** argv)
     free(image); /* we can release the memory now */
 
     return retVal;
-}
-
-/* Callback from the VM that something went wrong */
-void Com_Error(vmErrorCode_t level, const char* error)
-{
-    fprintf(stderr, "Err (%i): %s\n", level, error);
-    exit(level);
-}
-
-/* Callback from the VM for memory allocation */
-void* Com_malloc(size_t size, vm_t* vm, vmMallocType_t type)
-{
-    (void)vm;
-    (void)type;
-    return malloc(size);
-}
-
-/* Callback from the VM for memory release */
-void Com_free(void* p, vm_t* vm, vmMallocType_t type)
-{
-    (void)vm;
-    (void)type;
-    free(p);
-}
-
-uint8_t* loadImage(const char* filepath)
-{
-    FILE*    f;            /* bytecode input file */
-    uint8_t* image = NULL; /* bytecode buffer */
-    size_t   sz;           /* bytecode file size */
-
-    f = fopen(filepath, "rb");
-    if (!f)
-    {
-        fprintf(stderr, "Failed to open file %s.\n", filepath);
-        return NULL;
-    }
-    /* calculate file size */
-    fseek(f, 0L, SEEK_END);
-    sz = ftell(f);
-    rewind(f);
-
-    image = (uint8_t*)malloc(sz);
-    if (!image)
-    {
-        fclose(f);
-        return NULL;
-    }
-
-    if (fread(image, 1, sz, f) != sz)
-    {
-        free(image);
-        fclose(f);
-        return NULL;
-    }
-
-    fclose(f);
-    return image;
 }
 
 /* Callback from the VM: system function call */

@@ -8,6 +8,9 @@ EndProject
 Project("{D954291E-2A0B-460D-934E-DC6B0785DB48}") = "Q3VM", "Q3VM\Q3VM.shproj", "{25514980-4D0B-4230-BB9B-1B4773A5FA89}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Test", "Test\Test.csproj", "{9451654A-8106-4AEB-A07B-5A994883B60A}"
+	ProjectSection(ProjectDependencies) = postProject
+		{EDE29854-1672-4877-80DA-350EB7215B63} = {EDE29854-1672-4877-80DA-350EB7215B63}
+	EndProjectSection
 EndProject
 Global
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
