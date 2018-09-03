@@ -20,6 +20,8 @@ namespace Test {
 		}
 
 		static void Main(string[] Args) {
+			string SC = VM.GenerateSyscallsAsm(typeof(Syscalls));
+
 			VM V = new VM("out.qvm");
 			V.RegisterSyscalls(typeof(Syscalls));
 

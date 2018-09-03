@@ -34,7 +34,7 @@
 #define MAX_QPATH 64     /**< Maximum length of a pathname */
 
 /** Redirect printf() calls with this macro */
-#define Com_Printf printf
+#define Com_Printf() //#define Com_Printf printf
 /** Redirect memset() calls with this macro */
 #define Com_Memset memset
 /** Redirect memcpy() calls with this macro */
