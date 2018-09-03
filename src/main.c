@@ -44,7 +44,7 @@ int main(int argc, char** argv)
     {
         retVal = VM_Call(&vm, 0);
     }
-
+    // VM_VmProfile_f(&vm); /* output profile information in DEBUG_VM build */
     VM_Free(&vm);
     free(image); /* we can release the memory now */
 
@@ -112,27 +112,33 @@ uint8_t* loadImage(const char* filepath)
 /* Callback from the VM: system function call */
 intptr_t systemCalls(vm_t* vm, intptr_t* args)
 {
-    int id = -1 - args[0];
+    const int id = -1 - args[0];
 
     switch (id)
     {
     case -1: /* PRINTF */
-        printf("%s", (const char*)VMA(1, vm));
-        return 0;
+        return printf("%s", (const char*)VMA(1, vm));
+
     case -2: /* ERROR */
-        fprintf(stderr, "%s", (const char*)VMA(1, vm));
-        return 0;
+        return fprintf(stderr, "%s", (const char*)VMA(1, vm));
 
     case -3: /* MEMSET */
-        memset(VMA(1, vm), args[2], args[3]);
-        return 0;
+        if (VM_MemoryRangeValid(args[1]/*addr*/, args[3]/*len*/, vm) == 0)
+        {
+            memset(VMA(1, vm), args[2], args[3]);
+        }
+        return args[1];
 
     case -4: /* MEMCPY */
-        memcpy(VMA(1, vm), VMA(2, vm), args[3]);
-        return 0;
+        if (VM_MemoryRangeValid(args[1]/*addr*/, args[3]/*len*/, vm) == 0 &&
+            VM_MemoryRangeValid(args[2]/*addr*/, args[3]/*len*/, vm) == 0)
+        {
+            memcpy(VMA(1, vm), VMA(2, vm), args[3]);
+        }
+        return args[1];
 
     default:
-        fprintf(stderr, "Bad system call: %ld", (long int)args[0]);
+        fprintf(stderr, "Bad system call: %ld\n", (long int)args[0]);
     }
     return 0;
 }

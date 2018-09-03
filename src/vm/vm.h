@@ -9,6 +9,9 @@
    Quake III Arena Virtual Machine
 */
 
+#ifndef __Q3VM_H
+#define __Q3VM_H
+
 /******************************************************************************
  * SYSTEM INCLUDE FILES
  ******************************************************************************/
@@ -68,6 +71,7 @@ typedef enum {
     VM_STACK_MISALIGNED            = -9,
     VM_OP_LOAD4_MISALIGNED         = -10,
     VM_STACK_ERROR                 = -11,
+    VM_DATA_OUT_OF_RANGE           = -12,
 } vmErrorCode_t;
 
 /** VM alloc type */
@@ -75,6 +79,7 @@ typedef enum {
     VM_ALLOC_CODE_SEC             = 0, /**< Bytecode code section */
     VM_ALLOC_DATA_SEC             = 1, /**< Bytecode data section */
     VM_ALLOC_INSTRUCTION_POINTERS = 2, /**< Bytecode instruction pointers */
+    VM_ALLOC_DEBUG                = 3, /**< DEBUG_VM functions */
     VM_ALLOC_TYPE_MAX                  /**< Make this the last item */
 } vmMallocType_t;
 
@@ -155,7 +160,7 @@ typedef struct vm_s
     int breakFunction; /**< Debug breakpoints: increment breakCount on function
                          entry to this */
     int breakCount;    /**< Used for breakpoints (triggered by OP_BREAK) */
-    vmErrorCode_t errno; /**< Last known error */
+    vmErrorCode_t lastError; /**< Last known error */
 } vm_t;
 
 /******************************************************************************
@@ -214,11 +219,28 @@ void VM_Free(vm_t* vm);
  * @return Return value of the function call. */
 intptr_t VM_Call(vm_t* vm, int command, ...);
 
-/**< Helper function for the VMA macro
- * @param[in] intValue argument id
+/**< Translate from virtual machine memory to real machine memory
+ * @param[in] vmAddr address in virtual machine memory
  * @param[in,out] vm Current VM
+ * @param[in] len Length in bytes
  * @return translated address. */
-void* VM_ArgPtr(intptr_t intValue, vm_t* vm);
+void* VM_ArgPtr(intptr_t vmAddr, vm_t* vm);
+
+/**< Check if address + range in in the valid VM memory range.
+ * @param[in] vmAddr address in virtual machine memory
+ * @param[in] len Length in bytes
+ * @param[in] vm Current VM
+ * @return 0 if valid, -1 if invalid. */
+int VM_MemoryRangeValid(intptr_t vmAddr, size_t len, const vm_t* vm);
+
+/** Print profile statistics. Only useful with #define DEBUG_VM.
+ * Does nothing if DEBUG_VM is not defined.
+ * @param[in] vm VM to profile */
+void VM_VmProfile_f(const vm_t* vm);
+
+/** Set the printf debug level. Only useful with #define DEBUG_VM.
+ * @param[in] level If level is 0: be quiet (default). */
+void VM_Debug(int level);
 
 /******************************************************************************
  * INLINE
@@ -237,3 +259,5 @@ static ID_INLINE float _vmf(intptr_t x)
     fi.i = (int)x;
     return fi.f;
 }
+
+#endif /* __Q3VM_H */

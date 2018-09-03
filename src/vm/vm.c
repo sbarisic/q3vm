@@ -43,8 +43,6 @@
  * command number + 12 arguments */
 #define MAX_VMMAIN_ARGS 13
 
-#define MAX_TOKEN_CHARS 1024 /**< max length of an individual token */
-
 #if defined(Q3VM_BIG_ENDIAN) && defined(Q3VM_LITTLE_ENDIAN)
 #error "Endianness defined as both big and little"
 #elif defined(Q3VM_BIG_ENDIAN)
@@ -68,9 +66,6 @@ static ID_INLINE int LongSwap(int l)
 #else
 #error "Endianness not defined"
 #endif
-
-/** Used for debug output in DEBUG_VM */
-#define DEBUGSTR va("%s%i", VM_Indent(vm), opStackOfs)
 
 /* GCC can do computed gotos */
 #ifdef __GNUC__
@@ -239,11 +234,11 @@ typedef enum {
  * GLOBAL DATA DEFINITIONS
  ******************************************************************************/
 
-int vm_debugLevel; /**< if 0, be quiet, otherwise emit printf informations */
-
 /******************************************************************************
  * LOCAL DATA DEFINITIONS
  ******************************************************************************/
+
+static int vm_debugLevel; /**< 0: be quiet, otherwise print informations */
 
 /******************************************************************************
  * LOCAL FUNCTION PROTOTYPES
@@ -254,23 +249,27 @@ int vm_debugLevel; /**< if 0, be quiet, otherwise emit printf informations */
  * @param[in] src Input string.
  * @param[in] destsize Number of free bytes in dest. */
 static void Q_strncpyz(char* dest, const char* src, int destsize);
+
 /** Helper function for VM_Create: Set up the virtual machine during loading.
  * Ensure consistency and prepare the jumps.
  * @param[in,out] vm Pointer to virtual machine, prepared by VM_Create.
  * @param[in] header Header of .qvm bytecode.
  * @return 0 if everything is OK. -1 otherwise. */
 static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header);
+
 /** Helper function for VM_Create: Set up the virtual machine during loading.
  * Copy the data from the file input (bytecode) to the vm.
  * @param[in,out] vm Pointer to virtual machine, prepared by VM_Create.
  * @param[in] bytecode Pointer to bytecode.
  * @return Pointer to start/header of vm bytecode. */
 static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode);
+
 /** Run a function from the virtual machine with the interpreter (i.e. no JIT).
  * @param[in] vm Pointer to initialized virtual machine.
  * @param[in] args Arguments for function call.
  * @return Return value of the function call. */
 static int VM_CallInterpreted(vm_t* vm, int* args);
+
 /** Executes a block copy operation (memcpy) within currentVM data space.
  * @param[out] dest Pointer (in VM space).
  * @param[in] src Pointer (in VM space).
@@ -279,13 +278,34 @@ static int VM_CallInterpreted(vm_t* vm, int* args);
 static void VM_BlockCopy(unsigned int dest, unsigned int src, size_t n,
                          vm_t* vm);
 
+/******************************************************************************
+ * DEBUG FUNCTIONS
+ ******************************************************************************/
+
 #ifdef DEBUG_VM
-static void VM_VmInfo_f(void);
-static void VM_VmProfile_f(void);
+#include <stdio.h>           /* fopen to read symbols */
+#define MAX_TOKEN_CHARS 1024 /**< max length of an individual token */
+/* WARNING: DEBUG_VM is not thread safe */
+static char com_token[MAX_TOKEN_CHARS]; /**< helper for COM_Parse */
+static int  com_lines;                  /**< helper for COM_Parse */
+static int  com_tokenline;              /**< helper for COM_Parse */
+static int ParseHex(const char* text);  /**< helper for VM_LoadSymbols */
+static void COM_StripExtension(const char* in,
+                               char* out); /**< helper for VM_LoadSymbols */
+static char* VM_Indent(vm_t* vm);
+/** For profiling, find the symbol behind this value */
+static vmSymbol_t* VM_ValueToFunctionSymbol(vm_t* vm, int value);
+static const char* VM_ValueToSymbol(vm_t* vm, int value);
+/** Load a .map file for the virtual machine. The .map file
+ * should have the same path as the .qvm file. */
+static void VM_LoadSymbols(vm_t* vm);
+/** Load the file into a malloc'd buffer.
+ * @param[in] filepath File to load.
+ * @return file content in buffer. Call Com_free() to cleanup. */
+static uint8_t* loadImage(const char* filepath);
+/** Print a stack trace on OP_ENTER if vm_debugLevel is > 0 */
+static void VM_StackTrace(vm_t* vm, int programCounter, int programStack);
 #endif
-/** Set the printf debug level.
- * @param[in] level If level is 0, be quiet. */
-void VM_Debug(int level);
 
 /******************************************************************************
  * LOCAL INLINE FUNCTIONS AND FUNCTION MACROS
@@ -311,6 +331,66 @@ static void Q_strncpyz(char* dest, const char* src, int destsize)
     dest[destsize - 1] = 0;
 }
 
+int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
+              intptr_t (*systemCalls)(vm_t*, intptr_t*))
+{
+    vmHeader_t* header;
+
+    if (!vm)
+    {
+        Com_Error(VM_INVALID_POINTER, "Invalid vm pointer");
+        return -1;
+    }
+    if (!systemCalls)
+    {
+        vm->lastError = VM_NO_SYSCALL_CALLBACK;
+        Com_Error(vm->lastError, "No systemcalls provided");
+        return -1;
+    }
+
+    Com_Memset(vm, 0, sizeof(vm_t));
+    Q_strncpyz(vm->name, name, sizeof(vm->name));
+    header = VM_LoadQVM(vm, bytecode);
+    if (!header)
+    {
+        vm->lastError = VM_FAILED_TO_LOAD_BYTECODE;
+        Com_Error(vm->lastError, "Failed to load bytecode");
+        return -1;
+    }
+
+    vm->systemCall = systemCalls;
+
+    // allocate space for the jump targets, which will be filled in by the
+    // compile/prep functions
+    vm->instructionCount    = header->instructionCount;
+    vm->instructionPointers = (intptr_t*)Com_malloc(
+        vm->instructionCount * sizeof(*vm->instructionPointers), vm,
+        VM_ALLOC_INSTRUCTION_POINTERS);
+
+    // copy or compile the instructions
+    vm->codeLength = header->codeLength;
+
+    vm->compiled = 0; /* no JIT */
+    if (!vm->compiled)
+    {
+        if (VM_PrepareInterpreter(vm, header) != 0)
+        {
+            return -1;
+        }
+    }
+
+#ifdef DEBUG_VM
+    // load the map file
+    VM_LoadSymbols(vm);
+#endif
+
+    // the stack is implicitly at the end of the image
+    vm->programStack = vm->dataMask + 1;
+    vm->stackBottom  = vm->programStack - PROGRAM_STACK_SIZE;
+
+    return 0;
+}
+
 static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
 {
     int dataLength;
@@ -324,7 +404,6 @@ static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
     Com_Printf("Loading vm file %s...\n", vm->name);
 
     header.v = bytecode;
-
     if (!header.h)
     {
         Com_Printf("Failed.\n");
@@ -391,79 +470,25 @@ static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
     return header.h;
 }
 
-int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
-              intptr_t (*systemCalls)(vm_t*, intptr_t*))
-{
-    vmHeader_t* header;
-
-    if (!vm)
-    {
-        Com_Error(VM_INVALID_POINTER, "Invalid vm pointer.\n");
-        return -1;
-    }
-    Com_Memset(vm, 0, sizeof(vm_t));
-
-    Q_strncpyz(vm->name, name, sizeof(vm->name));
-    header = VM_LoadQVM(vm, bytecode);
-    if (!header)
-    {
-        vm->errno = VM_FAILED_TO_LOAD_BYTECODE;
-        Com_Error(vm->errno, "Failed to load bytecode.\n");
-        return -1;
-    }
-
-    if (!systemCalls)
-    {
-        vm->errno = VM_NO_SYSCALL_CALLBACK;
-        Com_Error(vm->errno, "No systemcalls provided.\n");
-        return -1;
-    }
-
-    vm->systemCall = systemCalls;
-
-    // allocate space for the jump targets, which will be filled in by the
-    // compile/prep functions
-    vm->instructionCount    = header->instructionCount;
-    vm->instructionPointers = (intptr_t*)Com_malloc(
-        vm->instructionCount * sizeof(*vm->instructionPointers), vm,
-        VM_ALLOC_INSTRUCTION_POINTERS);
-
-    // copy or compile the instructions
-    vm->codeLength = header->codeLength;
-
-    vm->compiled = 0;
-
-    // VM_Compile may have reset vm->compiled if compilation failed
-    if (!vm->compiled)
-    {
-        if (VM_PrepareInterpreter(vm, header) != 0)
-        {
-            return -1;
-        }
-    }
-
-    // load the map file
-    // VM_LoadSymbols( vm );
-
-    // the stack is implicitly at the end of the image
-    vm->programStack = vm->dataMask + 1;
-    vm->stackBottom  = vm->programStack - PROGRAM_STACK_SIZE;
-
-    return 0;
-}
-
 void VM_Free(vm_t* vm)
 {
-
     if (!vm)
     {
         return;
     }
 
+    vmSymbol_t* sym = vm->symbols;
+    while (sym)
+    {
+        vmSymbol_t* next = sym->next;
+        Com_free(sym, NULL, VM_ALLOC_DEBUG);
+        sym = next;
+    }
+
     if (vm->callLevel)
     {
-        vm->errno = VM_FREE_ON_RUNNING_VM;
-        Com_Error(vm->errno, "VM_Free on running vm");
+        vm->lastError = VM_FREE_ON_RUNNING_VM;
+        Com_Error(vm->lastError, "VM_Free on running vm");
         return;
     }
 
@@ -483,13 +508,38 @@ void VM_Free(vm_t* vm)
     Com_Memset(vm, 0, sizeof(*vm));
 }
 
-void* VM_ArgPtr(intptr_t intValue, vm_t* vm)
+void* VM_ArgPtr(intptr_t vmAddr, vm_t* vm)
 {
-    if (!intValue || vm == NULL)
+    if (!vmAddr)
     {
         return NULL;
     }
-    return (void*)(vm->dataBase + (intValue & vm->dataMask));
+    if (vm == NULL)
+    {
+        Com_Error(VM_INVALID_POINTER, "Invalid VM pointer");
+        return NULL;
+    }
+
+    return (void*)(vm->dataBase + (vmAddr & vm->dataMask));
+}
+
+int VM_MemoryRangeValid(intptr_t vmAddr, size_t len, const vm_t* vm)
+{
+    if (!vmAddr || !vm)
+    {
+        return -1;
+    }
+    const unsigned dest = vmAddr;
+    const unsigned dataMask = vm->dataMask;
+    if (((dest + len) & dataMask) != dest + len)
+    {
+        Com_Error(VM_DATA_OUT_OF_RANGE, "Memory access out of range");
+        return -1;
+    }
+    else
+    {
+        return 0;
+    }
 }
 
 intptr_t VM_Call(vm_t* vm, int command, ...)
@@ -503,11 +553,6 @@ intptr_t VM_Call(vm_t* vm, int command, ...)
     {
         Com_Error(VM_INVALID_POINTER, "VM_Call with NULL vm");
         return -1;
-    }
-
-    if (vm_debugLevel)
-    {
-        Com_Printf("VM_Call( %d )\n", command);
     }
 
     args[0] = command;
@@ -534,68 +579,30 @@ static void VM_BlockCopy(unsigned int dest, unsigned int src, size_t n,
         ((dest + n) & dataMask) != dest + n ||
         ((src + n) & dataMask) != src + n)
     {
-        vm->errno = VM_BLOCKCOPY_OUT_OF_RANGE;
-        Com_Error(vm->errno, "OP_BLOCK_COPY out of range!");
+        vm->lastError = VM_BLOCKCOPY_OUT_OF_RANGE;
+        Com_Error(vm->lastError, "OP_BLOCK_COPY out of range");
         return;
     }
 
     Com_Memcpy(vm->dataBase + dest, vm->dataBase + src, n);
 }
 
-void VM_Debug(int level)
-{
-    vm_debugLevel = level;
-}
-
 #ifdef DEBUG_VM
 const static char* opnames[256] = {
     "OP_UNDEF",
 
-    "OP_IGNORE",
-
-    "OP_BREAK",
-
-    "OP_ENTER", "OP_LEAVE", "OP_CALL", "OP_PUSH", "OP_POP",
-
-    "OP_CONST",
-
-    "OP_LOCAL",
-
-    "OP_JUMP",
-
-    //-------------------
-
-    "OP_EQ", "OP_NE",
-
-    "OP_LTI", "OP_LEI", "OP_GTI", "OP_GEI",
-
-    "OP_LTU", "OP_LEU", "OP_GTU", "OP_GEU",
-
-    "OP_EQF", "OP_NEF",
-
-    "OP_LTF", "OP_LEF", "OP_GTF", "OP_GEF",
-
-    //-------------------
-
-    "OP_LOAD1", "OP_LOAD2", "OP_LOAD4", "OP_STORE1", "OP_STORE2", "OP_STORE4",
-    "OP_ARG",
-
-    "OP_BLOCK_COPY",
-
-    //-------------------
-
-    "OP_SEX8", "OP_SEX16",
-
-    "OP_NEGI", "OP_ADD", "OP_SUB", "OP_DIVI", "OP_DIVU", "OP_MODI", "OP_MODU",
-    "OP_MULI", "OP_MULU",
-
-    "OP_BAND", "OP_BOR", "OP_BXOR", "OP_BCOM",
-
-    "OP_LSH", "OP_RSHI", "OP_RSHU",
-
-    "OP_NEGF", "OP_ADDF", "OP_SUBF", "OP_DIVF", "OP_MULF",
-
-    "OP_CVIF", "OP_CVFI"
+    "OP_IGNORE", "OP_BREAK",  "OP_ENTER", "OP_LEAVE",      "OP_CALL",
+    "OP_PUSH",   "OP_POP",    "OP_CONST", "OP_LOCAL",      "OP_JUMP",
+    "OP_EQ",     "OP_NE",     "OP_LTI",   "OP_LEI",        "OP_GTI",
+    "OP_GEI",    "OP_LTU",    "OP_LEU",   "OP_GTU",        "OP_GEU",
+    "OP_EQF",    "OP_NEF",    "OP_LTF",   "OP_LEF",        "OP_GTF",
+    "OP_GEF",    "OP_LOAD1",  "OP_LOAD2", "OP_LOAD4",      "OP_STORE1",
+    "OP_STORE2", "OP_STORE4", "OP_ARG",   "OP_BLOCK_COPY", "OP_SEX8",
+    "OP_SEX16",  "OP_NEGI",   "OP_ADD",   "OP_SUB",        "OP_DIVI",
+    "OP_DIVU",   "OP_MODI",   "OP_MODU",  "OP_MULI",       "OP_MULU",
+    "OP_BAND",   "OP_BOR",    "OP_BXOR",  "OP_BCOM",       "OP_LSH",
+    "OP_RSHI",   "OP_RSHU",   "OP_NEGF",  "OP_ADDF",       "OP_SUBF",
+    "OP_DIVF",   "OP_MULF",   "OP_CVIF",  "OP_CVFI"
 };
 #endif
 
@@ -637,8 +644,8 @@ static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
         codeBase[int_pc] = op;
         if (byte_pc > header->codeLength)
         {
-            vm->errno = VM_PC_OUT_OF_RANGE;
-            Com_Error(vm->errno,
+            vm->lastError = VM_PC_OUT_OF_RANGE;
+            Com_Error(vm->lastError,
                       "VM_PrepareInterpreter: pc > header->codeLength");
             return -1;
         }
@@ -717,9 +724,10 @@ static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
         case OP_GEF:
             if (codeBase[int_pc] < 0 || codeBase[int_pc] > vm->instructionCount)
             {
-                vm->errno = VM_JUMP_TO_INVALID_INSTRUCTION;
-                Com_Error(vm->errno, "VM_PrepareInterpreter: Jump to invalid "
-                                     "instruction number");
+                vm->lastError = VM_JUMP_TO_INVALID_INSTRUCTION;
+                Com_Error(vm->lastError,
+                          "VM_PrepareInterpreter: Jump to invalid "
+                          "instruction number");
                 return -1;
             }
 
@@ -816,8 +824,6 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
     *(int*)&image[programStack + 4] = 0;  // return stack
     *(int*)&image[programStack]     = -1; // will terminate the loop on return
 
-    VM_Debug(0);
-
     // leave a free spot at start of stack so
     // that as long as opStack is valid, opStack-1 will
     // not corrupt anything
@@ -825,7 +831,6 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
     *opStack   = 0xDEADBEEF;
     opStackOfs = 0;
 
-    // vm_debugLevel=2;
     // main interpreter loop, will exit when a LEAVE instruction
     // grabs the -1 program counter
 
@@ -882,28 +887,28 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
 #ifdef DEBUG_VM
         if ((unsigned)programCounter >= vm->codeLength)
         {
-            vm->errno = VM_PC_OUT_OF_RANGE;
-            Com_Error(vm->errno, "VM pc out of range");
+            vm->lastError = VM_PC_OUT_OF_RANGE;
+            Com_Error(vm->lastError, "VM pc out of range");
             return -1;
         }
 
         if (programStack <= vm->stackBottom)
         {
-            vm->errno = VM_STACK_OVERFLOW;
-            Com_Error(vm->errno, "VM stack overflow");
+            vm->lastError = VM_STACK_OVERFLOW;
+            Com_Error(vm->lastError, "VM stack overflow");
             return -1;
         }
 
         if (programStack & 3)
         {
-            vm->errno = VM_STACK_MISALIGNED;
-            Com_Error(vm->errno, "VM program stack misaligned");
+            vm->lastError = VM_STACK_MISALIGNED;
+            Com_Error(vm->lastError, "VM program stack misaligned");
             return -1;
         }
 
         if (vm_debugLevel > 1)
         {
-            Com_Printf("%s %s\n", DEBUGSTR, opnames[opcode]);
+            Com_Printf("%s%i %s\n", VM_Indent(vm), opStackOfs, opnames[opcode]);
         }
         profileSymbol->profileCount++;
 #endif /* DEBUG_VM */
@@ -931,8 +936,8 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
 #ifdef DEBUG_VM
             if (opStack[opStackOfs] & 3)
             {
-                vm->errno = VM_OP_LOAD4_MISALIGNED;
-                Com_Error(vm->errno, "OP_LOAD4 misaligned");
+                vm->lastError = VM_OP_LOAD4_MISALIGNED;
+                Com_Error(vm->lastError, "OP_LOAD4 misaligned");
                 return -1;
             }
 #endif
@@ -980,44 +985,37 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             {
                 // system call
                 int r;
-//              int     temp;
 #ifdef DEBUG_VM
-                int stomped;
-
                 if (vm_debugLevel)
                 {
-                    Com_Printf("%s---> systemcall(%i)\n", DEBUGSTR,
-                               -1 - programCounter);
+                    Com_Printf("%s%i---> systemcall(%i)\n", VM_Indent(vm),
+                               opStackOfs, -1 - programCounter);
                 }
 #endif
                 // save the stack to allow recursive VM entry
-                //              temp = vm->callLevel;
                 vm->programStack = programStack - 4;
 #ifdef DEBUG_VM
-                stomped = *(int*)&image[programStack + 4];
+                int stomped = *(int*)&image[programStack + 4];
 #endif
                 *(int*)&image[programStack + 4] = -1 - programCounter;
 
-                // VM_LogSyscalls( (int *)&image[ programStack + 4 ] );
+                // the vm has ints on the stack, we expect
+                // pointers so we might have to convert it
+                if (sizeof(intptr_t) != sizeof(int))
                 {
-                    // the vm has ints on the stack, we expect
-                    // pointers so we might have to convert it
-                    if (sizeof(intptr_t) != sizeof(int))
+                    intptr_t argarr[MAX_VMSYSCALL_ARGS];
+                    int*     imagePtr = (int*)&image[programStack];
+                    int      i;
+                    for (i = 0; i < ARRAY_LEN(argarr); ++i)
                     {
-                        intptr_t argarr[MAX_VMSYSCALL_ARGS];
-                        int*     imagePtr = (int*)&image[programStack];
-                        int      i;
-                        for (i = 0; i < ARRAY_LEN(argarr); ++i)
-                        {
-                            argarr[i] = *(++imagePtr);
-                        }
-                        r = vm->systemCall(vm, argarr);
+                        argarr[i] = *(++imagePtr);
                     }
-                    else
-                    {
-                        intptr_t* argptr = (intptr_t*)&image[programStack + 4];
-                        r                = vm->systemCall(vm, argptr);
-                    }
+                    r = vm->systemCall(vm, argarr);
+                }
+                else
+                {
+                    intptr_t* argptr = (intptr_t*)&image[programStack + 4];
+                    r                = vm->systemCall(vm, argptr);
                 }
 
 #ifdef DEBUG_VM
@@ -1030,19 +1028,18 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                 opStackOfs++;
                 opStack[opStackOfs] = r;
                 programCounter      = *(int*)&image[programStack];
-//              vm->callLevel = temp;
 #ifdef DEBUG_VM
                 if (vm_debugLevel)
                 {
-                    Com_Printf("%s<--- %s\n", DEBUGSTR,
+                    Com_Printf("%s%i<--- %s\n", VM_Indent(vm), opStackOfs,
                                VM_ValueToSymbol(vm, programCounter));
                 }
 #endif
             }
             else if ((unsigned)programCounter >= vm->instructionCount)
             {
-                vm->errno = VM_PC_OUT_OF_RANGE;
-                Com_Error(vm->errno,
+                vm->lastError = VM_PC_OUT_OF_RANGE;
+                Com_Error(vm->lastError,
                           "VM program counter out of range in OP_CALL");
                 return -1;
             }
@@ -1060,20 +1057,19 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             opStackOfs--;
             DISPATCH();
         goto_OP_ENTER:
-#ifdef DEBUG_VM
-            profileSymbol = VM_ValueToFunctionSymbol(vm, programCounter);
-#endif
             // get size of stack frame
             v1 = r2;
 
             programCounter += 1;
             programStack -= v1;
 #ifdef DEBUG_VM
+            profileSymbol = VM_ValueToFunctionSymbol(vm, programCounter);
+            //
             // save old stack frame for debugging traces
             *(int*)&image[programStack + 4] = programStack + v1;
             if (vm_debugLevel)
             {
-                Com_Printf("%s---> %s\n", DEBUGSTR,
+                Com_Printf("%s%i---> %s\n", VM_Indent(vm), opStackOfs,
                            VM_ValueToSymbol(vm, programCounter - 5));
                 if (vm->breakFunction &&
                     programCounter - 5 == vm->breakFunction)
@@ -1081,10 +1077,8 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                     // this is to allow setting breakpoints here in the debugger
                     vm->breakCount++;
                     //                  vm_debugLevel = 2;
-                    //                  VM_StackTrace( vm, programCounter,
-                    //                  programStack );
+                    VM_StackTrace(vm, programCounter, programStack);
                 }
-                //              vm->callLevel++;
             }
 #endif
             DISPATCH();
@@ -1100,8 +1094,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             profileSymbol = VM_ValueToFunctionSymbol(vm, programCounter);
             if (vm_debugLevel)
             {
-                //              vm->callLevel--;
-                Com_Printf("%s<--- %s\n", DEBUGSTR,
+                Com_Printf("%s%i<--- %s\n", VM_Indent(vm), opStackOfs,
                            VM_ValueToSymbol(vm, programCounter));
             }
 #endif
@@ -1112,8 +1105,8 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             }
             else if ((unsigned)programCounter >= vm->codeLength)
             {
-                vm->errno = VM_PC_OUT_OF_RANGE;
-                Com_Error(vm->errno,
+                vm->lastError = VM_PC_OUT_OF_RANGE;
+                Com_Error(vm->lastError,
                           "VM program counter out of range in OP_LEAVE");
                 return -1;
             }
@@ -1128,8 +1121,8 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
         goto_OP_JUMP:
             if ((unsigned)r0 >= vm->instructionCount)
             {
-                vm->errno = VM_PC_OUT_OF_RANGE;
-                Com_Error(vm->errno,
+                vm->lastError = VM_PC_OUT_OF_RANGE;
+                Com_Error(vm->lastError,
                           "VM program counter out of range in OP_JUMP");
                 return -1;
             }
@@ -1454,8 +1447,8 @@ done:
 
     if (opStackOfs != 1 || *opStack != 0xDEADBEEF)
     {
-        vm->errno = VM_STACK_ERROR;
-        Com_Error(vm->errno, "Interpreter stack error");
+        vm->lastError = VM_STACK_ERROR;
+        Com_Error(vm->lastError, "Interpreter stack error");
     }
 
     vm->programStack = stackOnEntry;
@@ -1464,19 +1457,16 @@ done:
     return opStack[opStackOfs];
 }
 
-/* UNFINISHED DEBUG FUNCTIONS */
-/* -------------------------- */
+/* DEBUG FUNCTIONS */
+/* --------------- */
+
+void VM_Debug(int level)
+{
+    vm_debugLevel = level;
+}
 
 #ifdef DEBUG_VM
-
-/*
-vmSymbol_t *VM_ValueToFunctionSymbol( vm_t *vm, int value );
-int VM_SymbolToValue( vm_t *vm, const char *symbol );
-const char *VM_ValueToSymbol( vm_t *vm, int value );
-void VM_LogSyscalls( int *args );
-*/
-
-char* VM_Indent(vm_t* vm)
+static char* VM_Indent(vm_t* vm)
 {
     static char* string = "                                        ";
     if (vm->callLevel > 20)
@@ -1486,14 +1476,7 @@ char* VM_Indent(vm_t* vm)
     return string + 2 * (20 - vm->callLevel);
 }
 
-/*
-===============
-VM_ValueToSymbol
-
-Assumes a program counter value
-===============
-*/
-const char* VM_ValueToSymbol(vm_t* vm, int value)
+static const char* VM_ValueToSymbol(vm_t* vm, int value)
 {
     vmSymbol_t* sym;
     static char text[MAX_TOKEN_CHARS];
@@ -1520,14 +1503,7 @@ const char* VM_ValueToSymbol(vm_t* vm, int value)
     return text;
 }
 
-/*
-===============
-VM_ValueToFunctionSymbol
-
-For profiling, find the symbol behind this value
-===============
-*/
-vmSymbol_t* VM_ValueToFunctionSymbol(vm_t* vm, int value)
+static vmSymbol_t* VM_ValueToFunctionSymbol(vm_t* vm, int value)
 {
     vmSymbol_t*       sym;
     static vmSymbol_t nullSym;
@@ -1546,30 +1522,6 @@ vmSymbol_t* VM_ValueToFunctionSymbol(vm_t* vm, int value)
     return sym;
 }
 
-/*
-===============
-VM_SymbolToValue
-===============
-*/
-int VM_SymbolToValue(vm_t* vm, const char* symbol)
-{
-    vmSymbol_t* sym;
-
-    for (sym = vm->symbols; sym; sym = sym->next)
-    {
-        if (!strcmp(symbol, sym->symName))
-        {
-            return sym->symValue;
-        }
-    }
-    return 0;
-}
-
-/*
-===============
-ParseHex
-===============
-*/
 static int ParseHex(const char* text)
 {
     int value;
@@ -1598,7 +1550,7 @@ static int ParseHex(const char* text)
     return value;
 }
 
-void COM_StripExtension(const char* in, char* out)
+static void COM_StripExtension(const char* in, char* out)
 {
     while (*in && *in != '.')
     {
@@ -1607,12 +1559,176 @@ void COM_StripExtension(const char* in, char* out)
     *out = 0;
 }
 
-/*
-===============
-VM_LoadSymbols
-===============
-*/
-void VM_LoadSymbols(vm_t* vm)
+static uint8_t* loadImage(const char* filepath)
+{
+    FILE*    f;            /* input file */
+    uint8_t* image = NULL; /* buffer */
+    size_t   sz;           /* bytecode file size */
+
+    f = fopen(filepath, "rb");
+    if (!f)
+    {
+        return NULL;
+    }
+    /* calculate file size */
+    fseek(f, 0L, SEEK_END);
+    sz = ftell(f);
+    rewind(f);
+
+    image = (uint8_t*)Com_malloc(sz, NULL, VM_ALLOC_DEBUG);
+    if (!image)
+    {
+        fclose(f);
+        return NULL;
+    }
+
+    if (fread(image, 1, sz, f) != sz)
+    {
+        Com_free(image, NULL, VM_ALLOC_DEBUG);
+        fclose(f);
+        return NULL;
+    }
+
+    fclose(f);
+    return image;
+}
+
+static char* SkipWhitespace(char* data, int* hasNewLines)
+{
+    int c;
+
+    while ((c = *data) <= ' ')
+    {
+        if (!c)
+        {
+            return NULL;
+        }
+        if (c == '\n')
+        {
+            com_lines++;
+            *hasNewLines = 1;
+        }
+        data++;
+    }
+
+    return data;
+}
+
+static char* COM_Parse(char** data_p)
+{
+    int   c           = 0, len;
+    int   hasNewLines = 0;
+    char* data;
+    int   allowLineBreaks = 1;
+
+    data          = *data_p;
+    len           = 0;
+    com_token[0]  = 0;
+    com_tokenline = 0;
+
+    // make sure incoming data is valid
+    if (!data)
+    {
+        *data_p = NULL;
+        return com_token;
+    }
+
+    while (1)
+    {
+        // skip whitespace
+        data = SkipWhitespace(data, &hasNewLines);
+        if (!data)
+        {
+            *data_p = NULL;
+            return com_token;
+        }
+        if (hasNewLines && !allowLineBreaks)
+        {
+            *data_p = data;
+            return com_token;
+        }
+
+        c = *data;
+
+        // skip double slash comments
+        if (c == '/' && data[1] == '/')
+        {
+            data += 2;
+            while (*data && *data != '\n')
+            {
+                data++;
+            }
+        }
+        // skip /* */ comments
+        else if (c == '/' && data[1] == '*')
+        {
+            data += 2;
+            while (*data && (*data != '*' || data[1] != '/'))
+            {
+                if (*data == '\n')
+                {
+                    com_lines++;
+                }
+                data++;
+            }
+            if (*data)
+            {
+                data += 2;
+            }
+        }
+        else
+        {
+            break;
+        }
+    }
+
+    // token starts on this line
+    com_tokenline = com_lines;
+
+    // handle quoted strings
+    if (c == '\"')
+    {
+        data++;
+        while (1)
+        {
+            c = *data++;
+            if (c == '\"' || !c)
+            {
+                com_token[len] = 0;
+                *data_p        = (char*)data;
+                return com_token;
+            }
+            if (c == '\n')
+            {
+                com_lines++;
+            }
+            if (len < MAX_TOKEN_CHARS - 1)
+            {
+                com_token[len] = c;
+                len++;
+            }
+        }
+    }
+
+    // parse a regular word
+    do
+    {
+        if (len < MAX_TOKEN_CHARS - 1)
+        {
+            com_token[len] = c;
+            len++;
+        }
+        data++;
+        c = *data;
+    } while (c > 32);
+
+    com_token[len] = 0;
+
+    *data_p = (char*)data;
+    return com_token;
+}
+
+static void VM_LoadSymbols(vm_t* vm)
 {
     union {
         char* c;
@@ -1628,9 +1744,11 @@ void VM_LoadSymbols(vm_t* vm)
     int          segment;
     int          numInstructions;
 
-    COM_StripExtension(vm->name, name, sizeof(name));
+    COM_StripExtension(vm->name, name);
     snprintf(symbols, sizeof(symbols), "%s.map", name);
-    FS_ReadFile(symbols, &mapfile.v);
+    Com_Printf("Loading symbol file: %s...\n", symbols);
+    mapfile.v = loadImage(symbols);
+
     if (!mapfile.c)
     {
         Com_Printf("Couldn't load symbol file: %s\n", symbols);
@@ -1674,7 +1792,7 @@ void VM_LoadSymbols(vm_t* vm)
             break;
         }
         chars     = strlen(token);
-        sym       = Hunk_Alloc(sizeof(*sym) + chars, h_high);
+        sym       = Com_malloc(sizeof(*sym) + chars, NULL, VM_ALLOC_DEBUG);
         *prev     = sym;
         prev      = &sym->next;
         sym->next = NULL;
@@ -1693,10 +1811,21 @@ void VM_LoadSymbols(vm_t* vm)
 
     vm->numSymbols = count;
     Com_Printf("%i symbols parsed from %s\n", count, symbols);
-    FS_FreeFile(mapfile.v);
+    Com_free(mapfile.v, NULL, VM_ALLOC_DEBUG);
 }
 
-//=================================================================
+static void VM_StackTrace(vm_t* vm, int programCounter, int programStack)
+{
+    int count;
+
+    count = 0;
+    do
+    {
+        Com_Printf("%s\n", VM_ValueToSymbol(vm, programCounter));
+        programStack   = *(int*)&vm->dataBase[programStack + 4];
+        programCounter = *(int*)&vm->dataBase[programStack];
+    } while (programCounter != -1 && ++count < 32);
+}
 
 static int VM_ProfileSort(const void* a, const void* b)
 {
@@ -1716,32 +1845,23 @@ static int VM_ProfileSort(const void* a, const void* b)
     return 0;
 }
 
-/*
-==============
-VM_VmProfile_f
-
-==============
-*/
-void VM_VmProfile_f(void)
+void VM_VmProfile_f(const vm_t* vm)
 {
-    vm_t*        vm;
     vmSymbol_t **sorted, *sym;
     int          i;
     double       total;
 
-    if (!lastVM)
+    if (!vm)
     {
         return;
     }
-
-    vm = lastVM;
 
     if (vm->numSymbols < 1)
     {
         return;
     }
 
-    sorted    = Z_Malloc(vm->numSymbols * sizeof(*sorted));
+    sorted = Com_malloc(vm->numSymbols * sizeof(*sorted), NULL, VM_ALLOC_DEBUG);
     sorted[0] = vm->symbols;
     total     = sorted[0]->profileCount;
     for (i = 1; i < vm->numSymbols; i++)
@@ -1765,76 +1885,11 @@ void VM_VmProfile_f(void)
 
     Com_Printf("    %9.0f total\n", total);
 
-    Z_Free(sorted);
+    Com_free(sorted, NULL, VM_ALLOC_DEBUG);
 }
-
-/*
-==============
-VM_VmInfo_f
-
-==============
-*/
-void VM_VmInfo_f(void)
+#else
+void VM_VmProfile_f(const vm_t* vm)
 {
-    vm_t* vm;
-    int   i;
-
-    Com_Printf("Registered virtual machines:\n");
-    for (i = 0; i < MAX_VM; i++)
-    {
-        vm = &vmTable[i];
-        if (!vm->name[0])
-        {
-            break;
-        }
-        Com_Printf("%s : ", vm->name);
-        if (vm->compiled)
-        {
-            Com_Printf("compiled on load\n");
-        }
-        else
-        {
-            Com_Printf("interpreted\n");
-        }
-        Com_Printf("    code length : %7i\n", vm->codeLength);
-        Com_Printf("    table length: %7i\n", vm->instructionCount * 4);
-        Com_Printf("    data length : %7i\n", vm->dataMask + 1);
-    }
+    (void)vm;
 }
-
-/*
-===============
-VM_LogSyscalls
-
-Insert calls to this while debugging the vm compiler
-===============
-*/
-void VM_LogSyscalls(int* args)
-{
-    static int   callnum;
-    static FILE* f;
-
-    if (!f)
-    {
-        f = fopen("syscalls.log", "w");
-    }
-    callnum++;
-    fprintf(f, "%i: %p (%i) = %i %i %i %i\n", callnum,
-            (void*)(args - (int*)currentVM->dataBase), args[0], args[1],
-            args[2], args[3], args[4]);
-}
-
-void VM_StackTrace(vm_t* vm, int programCounter, int programStack)
-{
-    int count;
-
-    count = 0;
-    do
-    {
-        Com_Printf("%s\n", VM_ValueToSymbol(vm, programCounter));
-        programStack   = *(int*)&vm->dataBase[programStack + 4];
-        programCounter = *(int*)&vm->dataBase[programStack];
-    } while (programCounter != -1 && ++count < 32);
-}
-
 #endif

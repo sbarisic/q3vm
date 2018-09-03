@@ -32,35 +32,41 @@ int testNominal(const char* filepath)
         return retVal;
     }
 
+    VM_Debug(1);
     if (VM_Create(&vm, filepath, image, systemCalls) == 0)
     {
-        /* let's call with some unexpected arguments, we expect a -1 as a result
-         */
-        retVal = VM_Call(&vm, 0, 9001, -1000, 0);
+        /* normal call, should give us 0 */
+        retVal = VM_Call(&vm, 0);
         /* now do the proper call, this should give us 333 */
         retVal += VM_Call(&vm, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
-        /* so now retVal should be 332 if everything is as expected */
-        printf("Result (should be 332): %i\n", retVal);
+        /* so now retVal should be 333 if everything is as expected */
+        printf("Result (should be 333): %i\n", retVal);
     }
-
+    VM_VmProfile_f(&vm);
     VM_Free(&vm);
-    free(image); /* we can release the memory now */
+    free(image);
 
-    return (retVal == 332) ? 0 : -1;
+    return (retVal == 333) ? 0 : -1;
 }
 
 void testArguments(void)
 {
     vm_t vm;
 
+    VM_ArgPtr(0, NULL);
     loadImage(NULL);
     loadImage("invalidpathfoobar");
+    VM_Create(NULL, NULL, NULL, NULL);
+    VM_Create(&vm, NULL, NULL, NULL);
     VM_Create(&vm, NULL, NULL, systemCalls);
     VM_Create(&vm, "test", NULL, systemCalls);
 
     uint8_t bogus[] = "bogusbogusbogus";
     VM_Create(&vm, "test", bogus, NULL);
     VM_Create(&vm, "test", bogus, systemCalls);
+
+    VM_Call(NULL, 0);
+
     VM_Free(NULL);
 
     vm.callLevel = 1;
@@ -145,27 +151,33 @@ uint8_t* loadImage(const char* filepath)
 /* Callback from the VM: system function call */
 intptr_t systemCalls(vm_t* vm, intptr_t* args)
 {
-    int id = -1 - args[0];
+    const int id = -1 - args[0];
 
     switch (id)
     {
     case -1: /* PRINTF */
-        printf("%s", (const char*)VMA(1, vm));
-        return 0;
+        return printf("%s", (const char*)VMA(1, vm));
+
     case -2: /* ERROR */
-        fprintf(stderr, "%s", (const char*)VMA(1, vm));
-        return 0;
+        return fprintf(stderr, "%s", (const char*)VMA(1, vm));
 
     case -3: /* MEMSET */
-        memset(VMA(1, vm), args[2], args[3]);
-        return 0;
+        if (VM_MemoryRangeValid(args[1]/*addr*/, args[3]/*len*/, vm) == 0)
+        {
+            memset(VMA(1, vm), args[2], args[3]);
+        }
+        return args[1];
 
     case -4: /* MEMCPY */
-        memcpy(VMA(1, vm), VMA(2, vm), args[3]);
-        return 0;
+        if (VM_MemoryRangeValid(args[1]/*addr*/, args[3]/*len*/, vm) == 0 &&
+            VM_MemoryRangeValid(args[2]/*addr*/, args[3]/*len*/, vm) == 0)
+        {
+            memcpy(VMA(1, vm), VMA(2, vm), args[3]);
+        }
+        return args[1];
 
     default:
-        fprintf(stderr, "Bad system call: %ld", (long int)args[0]);
+        fprintf(stderr, "Bad system call: %ld\n", (long int)args[0]);
     }
     return 0;
 }
