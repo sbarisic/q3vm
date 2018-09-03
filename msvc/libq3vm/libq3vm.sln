@@ -12,6 +12,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Test", "Test\Test.csproj", 
 		{EDE29854-1672-4877-80DA-350EB7215B63} = {EDE29854-1672-4877-80DA-350EB7215B63}
 	EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "qvmbuild", "qvmbuild\qvmbuild.csproj", "{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}"
+EndProject
 Global
 	GlobalSection(SharedMSBuildProjectFiles) = preSolution
 		Q3VM\Q3VM.projitems*{25514980-4d0b-4230-bb9b-1b4773a5fa89}*SharedItemsImports = 13
@@ -48,6 +50,18 @@ Global
 		{9451654A-8106-4AEB-A07B-5A994883B60A}.Release|x64.Build.0 = Release|Any CPU
 		{9451654A-8106-4AEB-A07B-5A994883B60A}.Release|x86.ActiveCfg = Release|Any CPU
 		{9451654A-8106-4AEB-A07B-5A994883B60A}.Release|x86.Build.0 = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|x64.Build.0 = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Debug|x86.Build.0 = Debug|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|x64.ActiveCfg = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|x64.Build.0 = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|x86.ActiveCfg = Release|Any CPU
+		{E3B40ED8-43E3-4B60-BA9A-B5B964845C53}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
