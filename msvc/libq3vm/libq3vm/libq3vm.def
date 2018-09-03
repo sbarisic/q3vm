@@ -4,3 +4,6 @@ EXPORTS
 	VM_Free
 	VM_Call
 	VM_ArgPtr
+	VM_MemoryRangeValid
+	VM_VmProfile_f
+	VM_Debug
