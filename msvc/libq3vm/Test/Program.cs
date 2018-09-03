@@ -20,9 +20,10 @@ namespace Test {
 		}
 
 		static void Main(string[] Args) {
-			VM V = new VM("test.qvm");
+			VM V = new VM("out.qvm");
 			V.RegisterSyscalls(typeof(Syscalls));
-			V.Call(0);
+
+			Console.WriteLine("Result: {0}", V.Call(69).ToInt32());
 			Console.ReadLine();
 		}
 	}
