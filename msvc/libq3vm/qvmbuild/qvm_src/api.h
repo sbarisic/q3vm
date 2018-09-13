@@ -8,8 +8,9 @@
 API_EXTERN int __args[11];
 API_EXTERN int __cmd;
 
-void __print(const char* str);
-void __error(const char* str);
+#include <stdint.h>
+#include <api_generated.h>
+#include "printf.h"
 
 int main();
 

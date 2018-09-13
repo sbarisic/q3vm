@@ -5,6 +5,9 @@
       <Filter>vm</Filter>
     </ClCompile>
     <ClCompile Include="libq3vm.c" />
+    <ClCompile Include="vm_ext.c">
+      <Filter>vm</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <Filter Include="vm">

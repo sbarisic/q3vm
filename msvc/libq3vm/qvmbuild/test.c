@@ -1,7 +1,14 @@
 #include <api.h>
 
-int main() {
-    __print("Hello QVM World!\n");
+int main()
+{
+    int   Value    = 420;
+    void* PtrValue = &Value;
 
-	return __cmd;
+    printf("Hello QVM World! %i\n", __cmd);
+
+    printf("PtrValue = %i\n", PtrValue);
+    printf("Test(PtrValue) = %i\n", Test(PtrValue));
+
+    return __cmd;
 }

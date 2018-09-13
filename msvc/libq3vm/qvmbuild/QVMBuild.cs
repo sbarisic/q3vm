@@ -7,7 +7,7 @@ using System.IO;
 using System.Diagnostics;
 
 namespace qvmbuild {
-	class Program {
+	class QVMBuild {
 		static string AsmDir = "qvm_asm";
 		static string ApiDir = "qvm_src";
 		static string OutFileName = "out.qvm";
@@ -33,7 +33,7 @@ namespace qvmbuild {
 			const string ProgDir = "E:\\Projects2018\\q3vm\\bin\\win32";
 			AddToPath(ProgDir);
 
-			CleanAsmFiles = true;
+			CleanAsmFiles = false;
 			UseAPI = true;
 
 			for (int i = 0; i < Args.Length; i++) {
@@ -61,7 +61,15 @@ namespace qvmbuild {
 
 			if (UseAPI) {
 				IncludeDirs.Add(ApiDir);
+
 				CFiles.Insert(0, Path.Combine(ApiDir, "api.c"));
+
+				foreach (var CFile in Directory.GetFiles(ApiDir, "*.c", SearchOption.AllDirectories)) {
+					if (Path.GetFileName(CFile) == "api.c")
+						continue;
+
+					CFiles.Add(CFile);
+				}
 			}
 
 			EnsureDirExists(AsmDir);

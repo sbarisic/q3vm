@@ -151,6 +151,7 @@
   <ItemGroup>
     <ClCompile Include="..\..\..\src\vm\vm.c" />
     <ClCompile Include="libq3vm.c" />
+    <ClCompile Include="vm_ext.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\..\src\vm\vm.h" />
