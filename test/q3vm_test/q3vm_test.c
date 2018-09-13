@@ -11,6 +11,9 @@
 
 #include "vm.h"
 #include <stdio.h>
+#include <stdlib.h>
+
+static int g_mallocFail = -1; /* if this is not -1, malloc will fail */
 
 /* The compiled bytecode calls native functions,
    defined in this file. */
@@ -19,6 +22,29 @@ intptr_t systemCalls(vm_t* vm, intptr_t* args);
 /* Load an image from a file. Data is allocated with malloc.
    Call free() to unload image. */
 uint8_t* loadImage(const char* filepath);
+
+int testInject(const char* filepath, int offset, int opcode)
+{
+    vm_t     vm;
+    uint8_t* image  = loadImage(filepath);
+    int      retVal = -1;
+
+    if (!image)
+    {
+        fprintf(stderr, "Failed to load bytecode image from %s\n", filepath);
+        return retVal;
+    }
+
+    fprintf(stderr, "Injecting wrong OP code %s at %i: %i\n",
+            filepath, offset, opcode);
+    memcpy(&image[offset], &opcode, sizeof(opcode)); /* INJECT */
+    retVal = VM_Create(&vm, filepath, image, systemCalls);
+    VM_Free(&vm);
+    free(image);
+
+    return (retVal == -1) ? 0 : -1;
+}
+
 
 int testNominal(const char* filepath)
 {
@@ -51,9 +77,14 @@ int testNominal(const char* filepath)
 
 void testArguments(void)
 {
-    vm_t vm;
+    vm_t vm = {0};
+
+    vm.codeLength = 0;
+    VM_Call(&vm, 0);
 
     VM_ArgPtr(0, NULL);
+    VM_ArgPtr(1, NULL);
+    VM_MemoryRangeValid(0, 0, NULL);
     loadImage(NULL);
     loadImage("invalidpathfoobar");
     VM_Create(NULL, NULL, NULL, NULL);
@@ -85,8 +116,22 @@ int main(int argc, char** argv)
 
     testArguments();
 
-    /* finally: test the normal case */
+    /* <malloc fail tests> */
+    for (int i=0;i<VM_ALLOC_TYPE_MAX-1;i++)
+    {
+        g_mallocFail = i;
+        testNominal(argv[1]);
+    }
+    g_mallocFail = -1;
+    /* </malloc fail tests> */
+
+    testInject(NULL, 0, 0);
     testNominal(NULL);
+    testInject(argv[1], 32, 0);
+    testInject(argv[1], 32, 63);
+    testInject(argv[1], 32, 65);
+    testInject(argv[1], 4, -1);
+    /* finally: test the normal case */
     return testNominal(argv[1]);
 }
 
@@ -100,6 +145,13 @@ void* Com_malloc(size_t size, vm_t* vm, vmMallocType_t type)
 {
     (void)vm;
     (void)type;
+    if (g_mallocFail != -1)
+    {
+        if (type == g_mallocFail)
+        {
+            return NULL;
+        }
+    }
     return malloc(size);
 }
 

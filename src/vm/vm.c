@@ -13,7 +13,7 @@
  * SYSTEM INCLUDE FILES
  ******************************************************************************/
 
-#include "stdarg.h"
+#include <stdarg.h>
 
 /******************************************************************************
  * PROJECT INCLUDE FILES
@@ -25,13 +25,7 @@
  * DEFINES
  ******************************************************************************/
 
-/** File start magic number for .qvm files */
-#define VM_MAGIC 0x12721444
-
-/** Don't change stack size: Hardcoded in q3asm a reserved at end of bss */
-#define PROGRAM_STACK_SIZE 0x10000
-#define PROGRAM_STACK_MASK (PROGRAM_STACK_SIZE - 1)
-
+/** Virtual machine op stack size in bytes */
 #define OPSTACK_SIZE 1024
 
 /** Max number of arguments to pass from a vm to engine's syscall handler
@@ -39,40 +33,24 @@
  * syscall number + 15 arguments */
 #define MAX_VMSYSCALL_ARGS 16
 
-/* Max number of arguments to pass from engine to vm's vmMain function.
+/** Max number of arguments to pass from engine to vm's vmMain function.
  * command number + 12 arguments */
 #define MAX_VMMAIN_ARGS 13
 
-#if defined(Q3VM_BIG_ENDIAN) && defined(Q3VM_LITTLE_ENDIAN)
-#error "Endianness defined as both big and little"
-#elif defined(Q3VM_BIG_ENDIAN)
-/** Helper function to swap bytes for the big endian version.
- * @param[in] l Input value
- * @return swapped output value. */
-static ID_INLINE int LongSwap(int l)
-{
-    uint8_t b1, b2, b3, b4;
+/** Macro to read 32-bit little endian value (from the .qvm file) and convert it
+ * to the host byte order */
+#define LittleLong(x) LittleEndianToHost((const uint8_t*)&(x))
 
-    b1 = l & 255;
-    b2 = (l >> 8) & 255;
-    b3 = (l >> 16) & 255;
-    b4 = (l >> 24) & 255;
-
-    return ((int)b1 << 24) + ((int)b2 << 16) + ((int)b3 << 8) + b4;
-}
-#define LittleLong(x) LongSwap(x)
-#elif defined(Q3VM_LITTLE_ENDIAN)
-#define LittleLong
-#else
-#error "Endianness not defined"
-#endif
-
-/* GCC can do computed gotos */
+/* GCC can do "computed gotos" instead of a traditional switch/case
+ * interpreter, this speeds up the execution. */
 #ifdef __GNUC__
 #ifndef DEBUG_VM           /* can't use computed gotos in debug mode */
 #define USE_COMPUTED_GOTOS /**< use computed gotos instead of a switch */
 #endif
 #endif
+
+#define OPCODE_TABLE_SIZE 64
+#define OPCODE_TABLE_MASK (OPCODE_TABLE_SIZE - 1)
 
 /******************************************************************************
  * TYPEDEFS
@@ -163,13 +141,16 @@ typedef enum {
     OP_MULF,
 
     OP_CVIF,
-    OP_CVFI
+    OP_CVFI,
+
+    OP_MAX /* make this the last item */
 } opcode_t;
 
 #ifndef USE_COMPUTED_GOTOS
 /* for the the computed gotos we need labels,
  * but for the normal switch case we need the cases */
-#define goto_OP_BREAK case OP_BREAK
+#define goto_OP_UNDEF case OP_UNDEF
+#define goto_OP_IGNORE case OP_IGNORE
 #define goto_OP_BREAK case OP_BREAK
 #define goto_OP_ENTER case OP_ENTER
 #define goto_OP_LEAVE case OP_LEAVE
@@ -231,24 +212,41 @@ typedef enum {
 #endif
 
 /******************************************************************************
- * GLOBAL DATA DEFINITIONS
- ******************************************************************************/
-
-/******************************************************************************
  * LOCAL DATA DEFINITIONS
  ******************************************************************************/
 
-static int vm_debugLevel; /**< 0: be quiet, otherwise print informations */
+static int vm_debugLevel; /**< 0: be quiet, 1: debug msgs, 2: print op codes */
+
+#ifdef DEBUG_VM
+/** Table to convert op codes to readable names */
+const static char* opnames[OPCODE_TABLE_SIZE] = {
+    "OP_UNDEF",
+    "OP_IGNORE", "OP_BREAK",  "OP_ENTER", "OP_LEAVE",      "OP_CALL",
+    "OP_PUSH",   "OP_POP",    "OP_CONST", "OP_LOCAL",      "OP_JUMP",
+    "OP_EQ",     "OP_NE",     "OP_LTI",   "OP_LEI",        "OP_GTI",
+    "OP_GEI",    "OP_LTU",    "OP_LEU",   "OP_GTU",        "OP_GEU",
+    "OP_EQF",    "OP_NEF",    "OP_LTF",   "OP_LEF",        "OP_GTF",
+    "OP_GEF",    "OP_LOAD1",  "OP_LOAD2", "OP_LOAD4",      "OP_STORE1",
+    "OP_STORE2", "OP_STORE4", "OP_ARG",   "OP_BLOCK_COPY", "OP_SEX8",
+    "OP_SEX16",  "OP_NEGI",   "OP_ADD",   "OP_SUB",        "OP_DIVI",
+    "OP_DIVU",   "OP_MODI",   "OP_MODU",  "OP_MULI",       "OP_MULU",
+    "OP_BAND",   "OP_BOR",    "OP_BXOR",  "OP_BCOM",       "OP_LSH",
+    "OP_RSHI",   "OP_RSHU",   "OP_NEGF",  "OP_ADDF",       "OP_SUBF",
+    "OP_DIVF",   "OP_MULF",   "OP_CVIF",  "OP_CVFI",
+    "OP_UNDEF",  "OP_UNDEF",  "OP_UNDEF", "OP_UNDEF",
+};
+#endif
 
 /******************************************************************************
  * LOCAL FUNCTION PROTOTYPES
  ******************************************************************************/
 
-/** @brief Safe strncpy that ensures a trailing zero.
- * @param[out] dest Output string.
- * @param[in] src Input string.
- * @param[in] destsize Number of free bytes in dest. */
-static void Q_strncpyz(char* dest, const char* src, int destsize);
+/** Helper function for VM_Create: Set up the virtual machine during loading.
+ * Copy the data from the file input (bytecode) to the vm.
+ * @param[in,out] vm Pointer to virtual machine, prepared by VM_Create.
+ * @param[in] bytecode Pointer to bytecode.
+ * @return Pointer to start/header of vm bytecode. */
+static const vmHeader_t* VM_LoadQVM(vm_t* vm, const uint8_t* bytecode);
 
 /** Helper function for VM_Create: Set up the virtual machine during loading.
  * Ensure consistency and prepare the jumps.
@@ -256,13 +254,6 @@ static void Q_strncpyz(char* dest, const char* src, int destsize);
  * @param[in] header Header of .qvm bytecode.
  * @return 0 if everything is OK. -1 otherwise. */
 static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header);
-
-/** Helper function for VM_Create: Set up the virtual machine during loading.
- * Copy the data from the file input (bytecode) to the vm.
- * @param[in,out] vm Pointer to virtual machine, prepared by VM_Create.
- * @param[in] bytecode Pointer to bytecode.
- * @return Pointer to start/header of vm bytecode. */
-static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode);
 
 /** Run a function from the virtual machine with the interpreter (i.e. no JIT).
  * @param[in] vm Pointer to initialized virtual machine.
@@ -278,8 +269,28 @@ static int VM_CallInterpreted(vm_t* vm, int* args);
 static void VM_BlockCopy(unsigned int dest, unsigned int src, size_t n,
                          vm_t* vm);
 
+/** Read a 32bit little endian value and convert it to host representation.
+ * @param[in] b Four bytes in little endian (32bit value)
+ * @return (swapped) output value in host machine order. */
+inline int LittleEndianToHost(const uint8_t b[4])
+{
+    return (b[0] << 0) | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
+}
+extern int LittleEndianToHost(const uint8_t b[4]);
+
+/** Helper function for the _vmf inline function _vmf in vm.h.
+ * @param[in] x Number that is actually a IEEE 754 float.
+ * @return float number */
+extern float _vmf(intptr_t x);
+
+/** @brief Safe strncpy that ensures a trailing zero.
+ * @param[out] dest Output string.
+ * @param[in] src Input string.
+ * @param[in] destsize Number of free bytes in dest. */
+static void Q_strncpyz(char* dest, const char* src, int destsize);
+
 /******************************************************************************
- * DEBUG FUNCTIONS
+ * DEBUG FUNCTIONS (only used if DEBUG_VM is defined)
  ******************************************************************************/
 
 #ifdef DEBUG_VM
@@ -321,21 +332,9 @@ static void VM_StackTrace(vm_t* vm, int programCounter, int programStack);
  * FUNCTION BODIES
  ******************************************************************************/
 
-static void Q_strncpyz(char* dest, const char* src, int destsize)
-{
-    if (!dest || !src || destsize < 1)
-    {
-        return;
-    }
-    strncpy(dest, src, destsize - 1);
-    dest[destsize - 1] = 0;
-}
-
-int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
+int VM_Create(vm_t* vm, const char* name, const uint8_t* bytecode,
               intptr_t (*systemCalls)(vm_t*, intptr_t*))
 {
-    vmHeader_t* header;
-
     if (!vm)
     {
         Com_Error(VM_INVALID_POINTER, "Invalid vm pointer");
@@ -350,11 +349,12 @@ int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
 
     Com_Memset(vm, 0, sizeof(vm_t));
     Q_strncpyz(vm->name, name, sizeof(vm->name));
-    header = VM_LoadQVM(vm, bytecode);
+    const vmHeader_t* header = VM_LoadQVM(vm, bytecode);
     if (!header)
     {
         vm->lastError = VM_FAILED_TO_LOAD_BYTECODE;
         Com_Error(vm->lastError, "Failed to load bytecode");
+        VM_Free(vm);
         return -1;
     }
 
@@ -366,8 +366,15 @@ int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
     vm->instructionPointers = (intptr_t*)Com_malloc(
         vm->instructionCount * sizeof(*vm->instructionPointers), vm,
         VM_ALLOC_INSTRUCTION_POINTERS);
+    if (!vm->instructionPointers)
+    {
+        vm->lastError = VM_MALLOC_FAILED;
+        Com_Error(vm->lastError,
+                  "Instr. pointer malloc failed: out of memory?");
+        VM_Free(vm);
+        return -1;
+    }
 
-    // copy or compile the instructions
     vm->codeLength = header->codeLength;
 
     vm->compiled = 0; /* no JIT */
@@ -375,6 +382,7 @@ int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
     {
         if (VM_PrepareInterpreter(vm, header) != 0)
         {
+            VM_Free(vm);
             return -1;
         }
     }
@@ -388,26 +396,34 @@ int VM_Create(vm_t* vm, const char* name, uint8_t* bytecode,
     vm->programStack = vm->dataMask + 1;
     vm->stackBottom  = vm->programStack - PROGRAM_STACK_SIZE;
 
+#if 1
+    Com_Printf("VM:\n");
+    Com_Printf(".code length: %6i bytes\n", header->codeLength);
+    Com_Printf(".data length: %6i bytes\n", header->dataLength);
+    Com_Printf(".lit  length: %6i bytes\n", header->litLength);
+    Com_Printf(".bss  length: %6i bytes\n", header->bssLength);
+    Com_Printf("Stack size:   %6i bytes\n", PROGRAM_STACK_SIZE);
+    Com_Printf("Allocated memory: %6i bytes\n", vm->dataAlloc);
+    Com_Printf("Instruction count: %i\n", header->instructionCount);
+#endif
+
     return 0;
 }
 
-static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
+static const vmHeader_t* VM_LoadQVM(vm_t* vm, const uint8_t* bytecode)
 {
     int dataLength;
     int i;
-    union {
-        vmHeader_t* h;
-        void*       v;
-    } header;
+    const union {
+        const vmHeader_t* h;
+        const uint8_t*    v;
+    } header = {.v = bytecode};
 
-    // load the image
     Com_Printf("Loading vm file %s...\n", vm->name);
 
-    header.v = bytecode;
     if (!header.h)
     {
         Com_Printf("Failed.\n");
-        VM_Free(vm);
         return NULL;
     }
 
@@ -415,14 +431,16 @@ static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
     {
         // byte swap the header
         // sizeof( vmHeader_t ) - sizeof( int ) is the 1.32b vm header size
-        for (i = 0; i < (sizeof(vmHeader_t) - sizeof(int)) / 4; i++)
+        for (i = 0; i < (int)(sizeof(vmHeader_t) - sizeof(int)) / 4; i++)
         {
             ((int*)header.h)[i] = LittleLong(((int*)header.h)[i]);
         }
 
         // validate
         if (header.h->bssLength < 0 || header.h->dataLength < 0 ||
-            header.h->litLength < 0 || header.h->codeLength <= 0)
+            header.h->litLength < 0 || header.h->codeLength <= 0 ||
+            header.h->codeOffset < 0 || header.h->dataOffset < 0 ||
+            header.h->instructionCount <= 0)
         {
             Com_Printf("Warning: %s has bad header\n", vm->name);
             return NULL;
@@ -450,12 +468,14 @@ static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
     vm->dataAlloc = dataLength + 4;
     vm->dataBase  = (uint8_t*)Com_malloc(vm->dataAlloc, vm, VM_ALLOC_DATA_SEC);
     vm->dataMask  = dataLength - 1;
-
     if (vm->dataBase == NULL)
     {
-        Com_Printf("Out of memory\n");
+        Com_Error(VM_MALLOC_FAILED, "Data malloc failed: out of memory?\n");
         return NULL;
     }
+    /* make sure data section is always initialized with 0
+     * (bss would be enough) */
+    Com_Memset(vm->dataBase, 0, vm->dataAlloc);
 
     // copy the intialized data
     Com_Memcpy(vm->dataBase, (uint8_t*)header.h + header.h->dataOffset,
@@ -470,21 +490,47 @@ static vmHeader_t* VM_LoadQVM(vm_t* vm, uint8_t* bytecode)
     return header.h;
 }
 
+intptr_t VM_Call(vm_t* vm, int command, ...)
+{
+    intptr_t r;
+    int      args[MAX_VMMAIN_ARGS];
+    va_list  ap;
+    int      i;
+
+    if (!vm)
+    {
+        Com_Error(VM_INVALID_POINTER, "VM_Call with NULL vm");
+        return -1;
+    }
+    if (vm->codeLength < 1)
+    {
+        vm->lastError = VM_NOT_LOADED;
+        Com_Error(vm->lastError, "VM not loaded");
+        return -1;
+    }
+
+    /* FIXME this is not nice. we should check the actual number of arguments */
+    args[0] = command;
+    va_start(ap, command);
+    for (i = 1; i < (int)ARRAY_LEN(args); i++)
+    {
+        args[i] = va_arg(ap, int);
+    }
+    va_end(ap);
+
+    ++vm->callLevel;
+    r = VM_CallInterpreted(vm, args);
+    --vm->callLevel;
+
+    return r;
+}
+
 void VM_Free(vm_t* vm)
 {
     if (!vm)
     {
         return;
     }
-
-    vmSymbol_t* sym = vm->symbols;
-    while (sym)
-    {
-        vmSymbol_t* next = sym->next;
-        Com_free(sym, NULL, VM_ALLOC_DEBUG);
-        sym = next;
-    }
-
     if (vm->callLevel)
     {
         vm->lastError = VM_FREE_ON_RUNNING_VM;
@@ -495,15 +541,30 @@ void VM_Free(vm_t* vm)
     if (vm->codeBase)
     {
         Com_free(vm->codeBase, vm, VM_ALLOC_CODE_SEC);
+        vm->codeBase = NULL;
     }
+
     if (vm->dataBase)
     {
         Com_free(vm->dataBase, vm, VM_ALLOC_DATA_SEC);
+        vm->dataBase = NULL;
     }
+
     if (vm->instructionPointers)
     {
         Com_free(vm->instructionPointers, vm, VM_ALLOC_INSTRUCTION_POINTERS);
+        vm->instructionPointers = NULL;
     }
+
+#ifdef DEBUG_VM
+    vmSymbol_t* sym = vm->symbols;
+    while (sym)
+    {
+        vmSymbol_t* next = sym->next;
+        Com_free(sym, NULL, VM_ALLOC_DEBUG);
+        sym = next;
+    }
+#endif
 
     Com_Memset(vm, 0, sizeof(*vm));
 }
@@ -529,9 +590,9 @@ int VM_MemoryRangeValid(intptr_t vmAddr, size_t len, const vm_t* vm)
     {
         return -1;
     }
-    const unsigned dest = vmAddr;
+    const unsigned dest     = vmAddr;
     const unsigned dataMask = vm->dataMask;
-    if (((dest + len) & dataMask) != dest + len)
+    if ((dest & dataMask) != dest || ((dest + len) & dataMask) != dest + len)
     {
         Com_Error(VM_DATA_OUT_OF_RANGE, "Memory access out of range");
         return -1;
@@ -542,32 +603,14 @@ int VM_MemoryRangeValid(intptr_t vmAddr, size_t len, const vm_t* vm)
     }
 }
 
-intptr_t VM_Call(vm_t* vm, int command, ...)
+static void Q_strncpyz(char* dest, const char* src, int destsize)
 {
-    intptr_t r;
-    int      args[MAX_VMMAIN_ARGS];
-    va_list  ap;
-    int      i;
-
-    if (!vm)
+    if (!dest || !src || destsize < 1)
     {
-        Com_Error(VM_INVALID_POINTER, "VM_Call with NULL vm");
-        return -1;
+        return;
     }
-
-    args[0] = command;
-    va_start(ap, command);
-    for (i = 1; i < ARRAY_LEN(args); i++)
-    {
-        args[i] = va_arg(ap, int);
-    }
-    va_end(ap);
-
-    ++vm->callLevel;
-    r = VM_CallInterpreted(vm, args);
-    --vm->callLevel;
-
-    return r;
+    strncpy(dest, src, destsize - 1);
+    dest[destsize - 1] = 0;
 }
 
 static void VM_BlockCopy(unsigned int dest, unsigned int src, size_t n,
@@ -587,32 +630,6 @@ static void VM_BlockCopy(unsigned int dest, unsigned int src, size_t n,
     Com_Memcpy(vm->dataBase + dest, vm->dataBase + src, n);
 }
 
-#ifdef DEBUG_VM
-const static char* opnames[256] = {
-    "OP_UNDEF",
-
-    "OP_IGNORE", "OP_BREAK",  "OP_ENTER", "OP_LEAVE",      "OP_CALL",
-    "OP_PUSH",   "OP_POP",    "OP_CONST", "OP_LOCAL",      "OP_JUMP",
-    "OP_EQ",     "OP_NE",     "OP_LTI",   "OP_LEI",        "OP_GTI",
-    "OP_GEI",    "OP_LTU",    "OP_LEU",   "OP_GTU",        "OP_GEU",
-    "OP_EQF",    "OP_NEF",    "OP_LTF",   "OP_LEF",        "OP_GTF",
-    "OP_GEF",    "OP_LOAD1",  "OP_LOAD2", "OP_LOAD4",      "OP_STORE1",
-    "OP_STORE2", "OP_STORE4", "OP_ARG",   "OP_BLOCK_COPY", "OP_SEX8",
-    "OP_SEX16",  "OP_NEGI",   "OP_ADD",   "OP_SUB",        "OP_DIVI",
-    "OP_DIVU",   "OP_MODI",   "OP_MODU",  "OP_MULI",       "OP_MULU",
-    "OP_BAND",   "OP_BOR",    "OP_BXOR",  "OP_BCOM",       "OP_LSH",
-    "OP_RSHI",   "OP_RSHU",   "OP_NEGF",  "OP_ADDF",       "OP_SUBF",
-    "OP_DIVF",   "OP_MULF",   "OP_CVIF",  "OP_CVFI"
-};
-#endif
-
-static ID_INLINE int loadWord(void* addr)
-{
-    int word;
-    Com_Memcpy(&word, addr, 4);
-    return LittleLong(word);
-}
-
 static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
 {
     int      op;
@@ -624,6 +641,13 @@ static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
 
     vm->codeBase = (uint8_t*)Com_malloc(
         vm->codeLength * 4, vm, VM_ALLOC_CODE_SEC); // we're now int aligned
+    if (!vm->codeBase)
+    {
+        Com_Error(VM_MALLOC_FAILED,
+                  "Data pointer malloc failed: out of memory?");
+        return -1;
+    }
+
     Com_Memcpy(vm->codeBase, (uint8_t*)header + header->codeOffset,
                vm->codeLength);
 
@@ -677,7 +701,7 @@ static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
         case OP_GTF:
         case OP_GEF:
         case OP_BLOCK_COPY:
-            codeBase[int_pc] = loadWord(&code[byte_pc]);
+            codeBase[int_pc] = LittleEndianToHost(&code[byte_pc]);
             byte_pc += 4;
             int_pc++;
             break;
@@ -687,6 +711,12 @@ static int VM_PrepareInterpreter(vm_t* vm, const vmHeader_t* header)
             int_pc++;
             break;
         default:
+            if (op < 0 || op >= OP_MAX)
+            {
+                vm->lastError = VM_BAD_INSTRUCTION;
+                Com_Error(vm->lastError, "Bad VM instruction");
+                return -1;
+            }
             break;
         }
     }
@@ -806,14 +836,11 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
     // uncomment this for debugging breakpoints
     vm->breakFunction = 0;
 #endif
-    // set up the stack frame
 
     image     = vm->dataBase;
     codeImage = (int*)vm->codeBase;
     dataMask  = vm->dataMask;
-
     programCounter = 0;
-
     programStack -= (8 + 4 * MAX_VMMAIN_ARGS);
 
     for (arg = 0; arg < MAX_VMMAIN_ARGS; arg++)
@@ -828,7 +855,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
     // that as long as opStack is valid, opStack-1 will
     // not corrupt anything
     opStack    = PADP(stack, 16);
-    *opStack   = 0xDEADBEEF;
+    *opStack   = 0x0000BEEF;
     opStackOfs = 0;
 
     // main interpreter loop, will exit when a LEAVE instruction
@@ -838,9 +865,9 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
 #define r2 codeImage[programCounter]
 
 #ifdef USE_COMPUTED_GOTOS
-    static const void* dispatch_table[] = {
-        &&goto_OP_LEAVE, /* OP_UNDEF */
-        &&goto_OP_LEAVE, /* OP_IGNORE */
+    static const void* dispatch_table[OPCODE_TABLE_SIZE] = {
+        &&goto_OP_UNDEF,
+        &&goto_OP_IGNORE,
         &&goto_OP_BREAK,  &&goto_OP_ENTER,  &&goto_OP_LEAVE,
         &&goto_OP_CALL,   &&goto_OP_PUSH,   &&goto_OP_POP,
         &&goto_OP_CONST,  &&goto_OP_LOCAL,  &&goto_OP_JUMP,
@@ -861,10 +888,14 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
         &&goto_OP_NEGF,   &&goto_OP_ADDF,   &&goto_OP_SUBF,
         &&goto_OP_DIVF,   &&goto_OP_MULF,   &&goto_OP_CVIF,
         &&goto_OP_CVFI,
+        &&goto_OP_UNDEF, /* Invalid OP CODE for opcode_table_mask */
+        &&goto_OP_UNDEF, /* Invalid OP CODE for opcode_table_mask */
+        &&goto_OP_UNDEF, /* Invalid OP CODE for opcode_table_mask */
+        &&goto_OP_UNDEF, /* Invalid OP CODE for opcode_table_mask */
     };
 #define DISPATCH2()                                                            \
     opcode = codeImage[programCounter++];                                      \
-    goto* dispatch_table[opcode]
+    goto* dispatch_table[opcode & OPCODE_TABLE_MASK]
 #define DISPATCH()                                                             \
     r0 = opStack[opStackOfs];                                                  \
     r1 = opStack[(uint8_t)(opStackOfs - 1)];                                   \
@@ -908,13 +939,23 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
 
         if (vm_debugLevel > 1)
         {
-            Com_Printf("%s%i %s\n", VM_Indent(vm), opStackOfs, opnames[opcode]);
+            Com_Printf("%s%i %s\n", VM_Indent(vm), opStackOfs,
+                       opnames[opcode & OPCODE_TABLE_MASK]);
         }
         profileSymbol->profileCount++;
 #endif /* DEBUG_VM */
         switch (opcode)
 #endif /* !USE_COMPUTED_GOTOS */
         {
+#ifdef DEBUG_VM
+        default: /* fall through */
+#endif
+        goto_OP_UNDEF:
+            vm->lastError = VM_BAD_INSTRUCTION;
+            Com_Error(vm->lastError, "Bad VM instruction");
+            return -1;
+        goto_OP_IGNORE:
+            DISPATCH2();
         goto_OP_BREAK:
             vm->breakCount++;
             DISPATCH2();
@@ -981,9 +1022,8 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             // jump to the location on the stack
             programCounter = r0;
             opStackOfs--;
-            if (programCounter < 0)
+            if (programCounter < 0) // system call
             {
-                // system call
                 int r;
 #ifdef DEBUG_VM
                 if (vm_debugLevel)
@@ -1006,7 +1046,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                     intptr_t argarr[MAX_VMSYSCALL_ARGS];
                     int*     imagePtr = (int*)&image[programStack];
                     int      i;
-                    for (i = 0; i < ARRAY_LEN(argarr); ++i)
+                    for (i = 0; i < (int)ARRAY_LEN(argarr); ++i)
                     {
                         argarr[i] = *(++imagePtr);
                     }
@@ -1014,8 +1054,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                 }
                 else
                 {
-                    intptr_t* argptr = (intptr_t*)&image[programStack + 4];
-                    r                = vm->systemCall(vm, argptr);
+                    r = vm->systemCall(vm, (intptr_t*)&image[programStack + 4]);
                 }
 
 #ifdef DEBUG_VM
@@ -1036,7 +1075,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                 }
 #endif
             }
-            else if ((unsigned)programCounter >= vm->instructionCount)
+            else if ((unsigned)programCounter >= (unsigned)vm->instructionCount)
             {
                 vm->lastError = VM_PC_OUT_OF_RANGE;
                 Com_Error(vm->lastError,
@@ -1076,7 +1115,6 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
                 {
                     // this is to allow setting breakpoints here in the debugger
                     vm->breakCount++;
-                    //                  vm_debugLevel = 2;
                     VM_StackTrace(vm, programCounter, programStack);
                 }
             }
@@ -1103,7 +1141,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             {
                 goto done;
             }
-            else if ((unsigned)programCounter >= vm->codeLength)
+            else if ((unsigned)programCounter >= (unsigned)vm->codeLength)
             {
                 vm->lastError = VM_PC_OUT_OF_RANGE;
                 Com_Error(vm->lastError,
@@ -1119,7 +1157,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
            */
 
         goto_OP_JUMP:
-            if ((unsigned)r0 >= vm->instructionCount)
+            if ((unsigned)r0 >= (unsigned)vm->instructionCount)
             {
                 vm->lastError = VM_PC_OUT_OF_RANGE;
                 Com_Error(vm->lastError,
@@ -1434,10 +1472,10 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
             opStack[opStackOfs] = Q_ftol(((float*)opStack)[opStackOfs]);
             DISPATCH();
         goto_OP_SEX8:
-            opStack[opStackOfs] = (signed char)opStack[opStackOfs];
+            opStack[opStackOfs] = (int8_t)opStack[opStackOfs];
             DISPATCH();
         goto_OP_SEX16:
-            opStack[opStackOfs] = (short)opStack[opStackOfs];
+            opStack[opStackOfs] = (int16_t)opStack[opStackOfs];
             DISPATCH();
         }
     }
@@ -1445,7 +1483,7 @@ static int VM_CallInterpreted(vm_t* vm, int* args)
 done:
     vm->currentlyInterpreting = 0;
 
-    if (opStackOfs != 1 || *opStack != 0xDEADBEEF)
+    if (opStackOfs != 1 || *opStack != 0x0000BEEF)
     {
         vm->lastError = VM_STACK_ERROR;
         Com_Error(vm->lastError, "Interpreter stack error");
@@ -1791,9 +1829,16 @@ static void VM_LoadSymbols(vm_t* vm)
             Com_Printf("WARNING: incomplete line at end of file\n");
             break;
         }
-        chars     = strlen(token);
-        sym       = Com_malloc(sizeof(*sym) + chars, NULL, VM_ALLOC_DEBUG);
-        *prev     = sym;
+        chars = strlen(token);
+        sym   = Com_malloc(sizeof(*sym) + chars, NULL, VM_ALLOC_DEBUG);
+        *prev = sym;
+        if (!sym)
+        {
+            Com_Error(VM_MALLOC_FAILED,
+                      "Sym. pointer malloc failed: out of memory?");
+            break;
+        }
+        Com_Memset(sym, 0, sizeof(*sym) + chars);
         prev      = &sym->next;
         sym->next = NULL;
 
@@ -1849,7 +1894,7 @@ void VM_VmProfile_f(const vm_t* vm)
 {
     vmSymbol_t **sorted, *sym;
     int          i;
-    double       total;
+    float        total;
 
     if (!vm)
     {
@@ -1862,8 +1907,14 @@ void VM_VmProfile_f(const vm_t* vm)
     }
 
     sorted = Com_malloc(vm->numSymbols * sizeof(*sorted), NULL, VM_ALLOC_DEBUG);
+    if (!sorted)
+    {
+        Com_Error(VM_MALLOC_FAILED,
+                  "Symbol pointer malloc failed: out of memory?");
+        return;
+    }
     sorted[0] = vm->symbols;
-    total     = sorted[0]->profileCount;
+    total     = (float)sorted[0]->profileCount;
     for (i = 1; i < vm->numSymbols; i++)
     {
         sorted[i] = sorted[i - 1]->next;
@@ -1878,7 +1929,7 @@ void VM_VmProfile_f(const vm_t* vm)
 
         sym = sorted[i];
 
-        perc = 100 * (float)sym->profileCount / total;
+        perc = (int)(100 * (float)sym->profileCount / total);
         Com_Printf("%2i%% %9i %s\n", perc, sym->profileCount, sym->symName);
         sym->profileCount = 0;
     }

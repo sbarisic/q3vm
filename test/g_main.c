@@ -16,6 +16,9 @@ int testCase(const char* f);
 /* this call is supposed to fail */
 int badcall(int i);
 
+volatile int        bssTest;         /* don't initialize, should be zero */
+volatile static int dataTest = -999; /* don't change, should be 999 */
+
 /*
 ================
 vmMain
@@ -218,14 +221,32 @@ int vmMain(int command, int arg0, int arg1, int arg2, int arg3, int arg4,
         {
             f = 0.0f;
         }
-        if (f == 0.0f)
+        if (f == df)
         {
             f = -f;
+        }
+        else
+        {
+            f = 2*f;
         }
         if (f != 0.0f)
         {
             f = 128 * f;
         }
+    }
+
+    /* test bss section: should be zero */
+    printf("bssTest: %i\n", bssTest);
+    if (bssTest != 0)
+    {
+        return -1;
+    }
+
+    /* test data section: should be -999 */
+    printf("dataTest: %i\n", dataTest);
+    if (dataTest != -999)
+    {
+        return -1;
     }
 
 #ifdef Q3_VM
